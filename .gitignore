@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 .venv/
 .env
+.vscode/
+.pytest_cache/
 
 # Datos y artefactos
 data/processed/
