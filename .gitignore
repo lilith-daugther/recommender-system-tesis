@@ -10,6 +10,7 @@ data/processed/
 models/
 outputs/
 *.log
+data/
 
 # Notebooks
 .ipynb_checkpoints/

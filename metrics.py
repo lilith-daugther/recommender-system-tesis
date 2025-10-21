@@ -1,240 +1,126 @@
-# metrics_documented.py
-"""
-Módulo de evaluación de sistemas de recomendación.
-Define y documenta funciones para las siguientes métricas:
-
-- Precision@K
-- Recall@K
-- Average Popularity
-- Intra-list Diversity
-- Item-space Coverage
-
-También incluye una función utilitaria para dividir ratings en train/test.
-"""
-
+# verified 
+#posibles cambios por paper, checar
+#SPLIT RATIONS PER USER aregado, checar otras formas de cross validation
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.metrics.pairwise import cosine_similarity
 
+# -------------------------------------------------------------------
+"""
+offline evaluation
 
-def split_ratings_per_user(ratings: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
-    """
-    Divide el conjunto de ratings en train y test por usuario (leave-one-out style).
+DIVIDIR  las calidicaciones en conjuntos de entrenamiento y prueba asegurando que el modelo se pruebe con datos que nunca ha visto antes.
+esta división se hace por usuario para simular un escenario del mundo real donde queremos predecir las calificaciones de los usuarios en libros que no han calificado previamente.
 
-    Para cada usuario:
-      - Si tiene < 2 ratings, todos van a train.
-      - Si tiene >= 2, se separa una fracción `test_size` para test y el resto a train.
+agrupar las calificaciones por usuario (user_id).
+para cada usuario, toma una facción (test_size) de sus calificaciones para el conjunto de prueba (test_sample) y el resto para el conjunto de entrenamiento (train_sample).
 
-    Parámetros:
-    - ratings: DataFrame con columnas ['User-ID', 'Title', 'Rating', ...]
-    - test_size: fracción de ratings de cada usuario que van a test.
-    - random_state: semilla para reproducibilidad.
+esto garantiza que el modelo se entrena cona lgunos libros de un susuario y se prueba con otros libros que ese mismo usuario calificó, 
+lo que refleja mejor cómo se utilizará el modelo en la práctica.
 
-    Retorna:
-    - train: DataFrame de ratings para entrenamiento.
-    - test: DataFrame de ratings para evaluación.
-    """
+"""
+
+def split_ratings_per_user(ratings_df, test_size, random_state=42):
     train_list, test_list = [], []
-    # Agrupar por usuario
-    for user, df_user in ratings.groupby('user_id'):
-        if len(df_user) < 2:
-            train_list.append(df_user)
-        else:
-            tn, te = train_test_split(df_user, test_size=test_size, random_state=random_state)
-            train_list.append(tn)
-            test_list.append(te)
+
+    for user_id, group in ratings_df.groupby('user_id'):
+        if len(group) < 2:
+            continue
+        test_sample = group.sample(frac=test_size, random_state=random_state)
+        train_sample = group.drop(test_sample.index)
+        train_list.append(train_sample)
+        test_list.append(test_sample)
+
+    if not train_list or not test_list:
+        print("DAMN no hay suficientes usuarios/libros después del filtrado.")
+        return pd.DataFrame(), pd.DataFrame()
+
     train = pd.concat(train_list).reset_index(drop=True)
     test = pd.concat(test_list).reset_index(drop=True)
     return train, test
 
 
-def precision_at_k(recommended: list, ground_truth: set, k: int) -> float:
-    """
-    Calcula Precision@K:
-    Proporción de ítems recomendados en las primeras K posiciones que están en el conjunto real.
-
-    Parámetros:
-    - recommended: lista ordenada de ítems recomendados.
-    - ground_truth: conjunto de ítems realmente relevantes (test).
-    - k: número de ítems a considerar del top-K.
-
-    Retorna:
-    - precision: float en [0,1].
-    """
-    
-    topk = recommended[:k]
-    hits = len([item for item in topk if item in ground_truth])
-    #print('recommended', recommended, '\n ','hits', '\n', 'topk',topk)
+# -------------------------------------------------------------------
+"""
+cuenta los aciertos (hits) en los primeros k ítems recomendados y los divide por k
+"""
+# Precision@k
+def precision_at_k(recommended, relevant, k):
+    if len(recommended) == 0:
+        return 0.0
+    recommended_at_k = recommended[:k]
+    hits = sum(1 for item in recommended_at_k if item in relevant)
     return hits / k
 
 
-def recall_at_k(recommended: list, ground_truth: set, k: int) -> float:
-    """
-    Calcula Recall@K:
-    Proporción de ítems relevantes que aparecen en las primeras K recomendaciones.
-
-    Parámetros:
-    - recommended: lista ordenada de ítems recomendados.
-    - ground_truth: conjunto de ítems realmente relevantes (test).
-    - k: número de ítems a considerar del top-K.
-
-    Retorna:
-    - recall: float en [0,1].
-    """
-    if not ground_truth:
+# -------------------------------------------------------------------
+"""
+cuenta los aciertos (hits) en los primeros k y los divide por el número total de ítems relevantes que el usuario calificó en la prueba (len(relevant)).
+"""
+# Recall@k
+def recall_at_k(recommended, relevant, k):
+    if len(relevant) == 0:
         return 0.0
-    topk = recommended[:k]
-    hits = len([item for item in topk if item in ground_truth])
-   
-    recall = hits / len(ground_truth)
-    return recall
+    recommended_at_k = recommended[:k]
+    hits = sum(1 for item in recommended_at_k if item in relevant)
+    return hits / len(relevant)
 
 
-def average_popularity(recommended: list, popularity_counts: dict) -> float:
-    """
-    Mide la popularidad media de una lista de recomendaciones.
+# -------------------------------------------------------------------
+"""
+medir qué tan populares son en promedio, los libros que el modelo recomienda. un valor alto indica un sesgo de popularidad
 
-    Parámetros usados:
-    recommended: lista de ítems recomendados.
-    popularity_counts: dict mapping ítem -> número total de ratings.
+toma la lista de titulos recomendados 
+busca el num de ratings de cada titulo en popularity_counts
+calcula el promedio de estos conteos de popularidad y lo devuelve
 
-    Retornamos:
-    avg_pop: promedio de counts de los ítems recomendados.
-
-    Valores altos indican tendencia a recomendar ítems muy populares.
-    Valores bajos indican recomendaciones menos conocidos.
-    """
-    if not recommended:
+"""
+# Popularidad promedio
+def average_popularity(recommended_titles, popularity_counts):
+    if not recommended_titles:
         return 0.0
-    pops = [popularity_counts.get(item, 0) for item in recommended]
-    return float(np.mean(pops))
+    pops = [popularity_counts.get(t, 0) for t in recommended_titles]
+    return np.mean(pops) if pops else 0.0
 
 
-def diversity(recommended: list, M: np.ndarray, title_to_idx: dict) -> float:
-    """
-    Calcula la diversidad intra-lista:
-    promedio de similitud coseno entre todos los pares de ítems en la lista recomendada.
+# -------------------------------------------------------------------
+"""
+mide que porcentaje de items disponibles (n_items_total) puede ser recomendado al menos una vez en todas las recomendaciones realizadas (all_recommendations).
 
-    Parámetros usados:
-    recommended: lista de ítems recomendados.
-    M: matriz TF-IDF de características de todos los libros.
-    title_to_idx: dict mapping ítem (Title) -> índice en M.
+une las recomednaciones generadas para todos los usuarios en un solo conjunto (unique_recs)
+divide el numero de items únicos recomendados por el número total de items disponibles para obtener la cobertura
+un coverage bajo significa que tu sistema solo recomienda una pequeña fracción de tu catálogo.
 
-    Retorna:
-    diversity: float en [0,1], donde 1 es máxima diversidad (poca similitud).
-    """
-    # Obtener índices válidos
-    idxs = [title_to_idx[item] for item in recommended if item in title_to_idx]
-    K = len(idxs)
-    if K < 2:
+"""
+# Cobertura
+def coverage(all_recommendations, n_items_total):
+    unique_recs = set()
+    for rec_list in all_recommendations:
+        unique_recs.update(rec_list)
+    return len(unique_recs) / n_items_total if n_items_total > 0 else 0.0
+
+
+# -------------------------------------------------------------------
+"""
+mide que tan diferentes son tematicamente los items recomendados en una misma lista
+
+toma la lista de titulos recomendadoa (perfiles de contenido)
+calcula la similitud coseno entre los pares de esos libros (cosine_similarity)
+calcula la similitud promedio (avg_sim) entre todos los pares
+la diversidad se define como 1 menos la similitud promedio (1 - avg_sim), si la similitud promedio es alta, la diversidad será baja y viceversa.
+"""
+# Diversidad
+def diversity(recommended_titles, tfidf_matrix, title_to_idx):
+    if len(recommended_titles) < 2:
         return 0.0
-    # Submatriz de similitudes
-    sims = cosine_similarity(M[idxs], M[idxs])
-    
-    tssd = sims[np.triu_indices(K, k=1)]
-    sim_mean = np.mean(tssd)
-    return 1.0 - sim_mean
 
-
-def coverage(recommended_sets: list, total_items: int) -> float:
-    """
-    Calcula el coverage:
-    proporción de ítems únicos recomendados al menos una vez sobre el total disponible.
-
-    Parámetros:
-    recommended_sets: lista de listas de recomendaciones (por usuario).
-    total_items: tamaño del catálogo filtrado.
-
-    Retorna:
-    coverage_ratio: float en [0,1].
-    """
-    if total_items <= 0:
+    indices = [title_to_idx[t] for t in recommended_titles if t in title_to_idx]
+    if len(indices) < 2:
         return 0.0
-    unique_recs = set(item for recs in recommended_sets for item in recs)
-    return len(unique_recs) / total_items
 
+    submatrix = tfidf_matrix[indices]
+    sims = cosine_similarity(submatrix)
+    upper_tri = sims[np.triu_indices_from(sims, k=1)]
+    avg_sim = np.mean(upper_tri) if len(upper_tri) > 0 else 0.0
 
-def evaluate_recommender(
-    recommender_fn,
-    books: pd.DataFrame,
-    ratings: pd.DataFrame,
-    M: np.ndarray,
-    title_to_idx: dict,
-    k: int = 5
-) -> dict:
-    """
-    Ejecuta un ciclo de evaluación para un conjunto de usuarios y computa métricas agregadas:
-    - Precision@K
-    - Recall@K
-    - Average Popularity
-    - Intra-list Diversity
-    - Coverage
-
-    Parámetros:
-    - recommender_fn: función(user_id, books, ratings, top_n=k) -> list de Titles.
-    - books: DataFrame de libros filtrados.
-    - ratings: DataFrame completo de ratings filtrados.
-    - M, title_to_idx: para calcular diversidad.
-    - k: tamaño de la lista de recomendación.
-
-    Retorna:
-    - metrics: dict con valores medios de cada métrica.
-    """
-    # Dividir train/test
-    train, test = split_ratings_per_user(ratings)
-
-    pop_counts = ratings['Title'].value_counts().to_dict()
-    precisions, recalls = [], []
-    pop_avgs, diversities = [], []
-    all_recs = []
-
-    for user, df_test in test.groupby('user_id'):
-        ground_truth = set(df_test['title'])
-        recs = recommender_fn(user_id=user, books=books, ratings=train, top_n=k)
-        all_recs.append(recs)
-
-        precisions.append(precision_at_k(recs, ground_truth, k))
-        recalls.append(recall_at_k(recs, ground_truth, k))
-        pop_avgs.append(average_popularity(recs, pop_counts))
-        diversities.append(diversity(recs, M, title_to_idx))
-
-    metrics = {
-        'precision@k': np.mean(precisions),
-        'recall@k': np.mean(recalls),
-        'avg_popularity': np.mean(pop_avgs),
-        'diversity': np.mean(diversities),
-        'coverage': coverage(all_recs, len(books))
-    }
-    return metrics
-
-
-# Ejemplo de uso:
-if __name__ == '__main__':
-    from hybrid_recomennder import hybrid_recommendation
-    from data_loader import load_books, load_ratings, prepare_data
-
-    # Carga y preparación
-    books = load_books()
-    ratings = load_ratings(sample_size=5000)
-    books_f, ratings_f = prepare_data(books, ratings)
-
-    # Precomputar TF-IDF para diversidad
-    from content_recommender import build_tfidf
-    vec, M = build_tfidf(books_f)
-    title_to_idx = {t:i for i, t in enumerate(books_f['Title'])}
-
-    metrics = evaluate_recommender(
-        recommender_fn=lambda user_id, books, ratings, top_n: hybrid_recommendation(
-            user_id=user_id,
-            books=books_f,
-            ratings=ratings_f,
-            top_n=top_n
-        ),
-        books=books_f,
-        ratings=ratings_f,
-        M=M,
-        title_to_idx=title_to_idx,
-        k=5
-    )
-    #print("Métricas de evaluación:", metrics)
+    return 1 - avg_sim
